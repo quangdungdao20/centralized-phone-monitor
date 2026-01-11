@@ -12,9 +12,7 @@ const App: React.FC = () => {
   const [showQR, setShowQR] = useState(false);
   const [isSender, setIsSender] = useState(false);
   const [focusedId, setFocusedId] = useState<string | null>(null);
-  
-  // Ref to track peer connections for each device ID
-  const pcs = useRef<Record<string, RTCPeerConnection>>({});
+  const [error, setError] = useState<string | null>(null);
   
   // Detection for mobile view (Sender)
   useEffect(() => {
@@ -34,24 +32,49 @@ const App: React.FC = () => {
 
   const handleRefresh = (id: string) => {
     console.log(`Refreshing device ${id}...`);
-    // Logic for ICE restart would go here
   };
 
-  // Mocking WebRTC signaling behavior for visualization
-  // In a real environment, you'd use socket.io to connect these.
-  const startScreenShare = async () => {
+  const startStreaming = async () => {
+    setError(null);
     try {
-      // FIX: Removed 'cursor: "always"' as it is not part of the standard MediaTrackConstraints type.
-      const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: true,
-        audio: false
-      });
+      if (!navigator.mediaDevices) {
+        throw new Error("MediaDevices API is not supported in this browser or environment (requires HTTPS).");
+      }
+
+      let stream: MediaStream;
+
+      // Try Screen Sharing first (Desktop)
+      if (navigator.mediaDevices.getDisplayMedia) {
+        try {
+          stream = await navigator.mediaDevices.getDisplayMedia({
+            video: true,
+            audio: false
+          });
+        } catch (e) {
+          // If user cancelled or it failed, try camera as fallback (Mobile)
+          console.log("getDisplayMedia failed, trying camera...");
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: "environment" },
+            audio: false
+          });
+        }
+      } else {
+        // Fallback directly to camera if getDisplayMedia is missing
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: "environment" },
+          audio: false
+        });
+      }
       
-      // Keep screen on simulation
-      const wakeLock = (navigator as any).wakeLock ? await (navigator as any).wakeLock.request('screen') : null;
+      // Optional Wake Lock API to prevent screen sleep
+      if ('wakeLock' in navigator) {
+        try {
+          await (navigator as any).wakeLock.request('screen');
+        } catch (err) {
+          console.warn("Wake lock failed:", err);
+        }
+      }
       
-      // On mobile, send this stream to the signaling server
-      // For this demo, we'll simulate the dashboard receiving it locally
       const mockId = Math.random().toString(36).substr(2, 9);
       setDevices(prev => [...prev, {
         id: mockId,
@@ -61,9 +84,10 @@ const App: React.FC = () => {
         isFocused: false,
         quality: 'high'
       }]);
-      setIsSender(false); // Move back to dashboard for demo purposes
-    } catch (err) {
-      console.error("Error sharing screen:", err);
+      setIsSender(false); 
+    } catch (err: any) {
+      console.error("Streaming error:", err);
+      setError(err.message || "Failed to start stream. Please ensure you are on HTTPS.");
     }
   };
 
@@ -74,22 +98,32 @@ const App: React.FC = () => {
           <span className="text-4xl">📱</span>
         </div>
         <h1 className="text-3xl font-bold mb-4">Phone Streamer</h1>
-        <p className="text-slate-400 mb-10 max-w-xs mx-auto">
-          Ready to share your screen? The central dashboard will see your activity in real-time.
+        <p className="text-slate-400 mb-6 max-w-xs mx-auto text-sm">
+          {navigator.mediaDevices?.getDisplayMedia 
+            ? "Ready to share your screen or camera with the dashboard." 
+            : "Screen sharing is not supported on this device. We will use your camera instead."}
         </p>
+
+        {error && (
+          <div className="mb-6 p-3 bg-red-500/10 border border-red-500/50 rounded-lg text-red-400 text-xs max-w-xs">
+            ⚠️ {error}
+          </div>
+        )}
+
         <button 
-          onClick={startScreenShare}
+          onClick={startStreaming}
           className="w-full max-w-xs py-4 px-8 bg-blue-600 hover:bg-blue-500 active:scale-95 transition-all text-white font-bold rounded-2xl shadow-xl shadow-blue-600/30 flex items-center justify-center gap-3"
         >
           <span className="text-xl">🚀</span>
-          START SHARING
+          START STREAMING
         </button>
+
         <div className="mt-12 p-4 bg-slate-800/50 rounded-xl border border-slate-700 text-left w-full max-w-xs">
           <p className="text-[10px] text-slate-500 uppercase font-bold mb-2">Requirements</p>
           <ul className="text-xs text-slate-400 space-y-2">
-            <li className="flex gap-2">✅ iOS 13+ / Android Chrome</li>
-            <li className="flex gap-2">✅ Stable Network</li>
-            <li className="flex gap-2">✅ Do Not Disturb Mode (Recommended)</li>
+            <li className="flex gap-2">🔒 HTTPS connection required</li>
+            <li className="flex gap-2">✅ Camera/Screen permissions</li>
+            <li className="flex gap-2">📱 Android/iOS Chrome or Safari</li>
           </ul>
         </div>
       </div>
@@ -104,7 +138,6 @@ const App: React.FC = () => {
 
   return (
     <div className="flex flex-col h-screen overflow-hidden">
-      {/* Header */}
       <header className="flex items-center justify-between px-6 py-4 bg-slate-900 border-b border-slate-800 shrink-0">
         <div className="flex items-center gap-4">
           <div className="p-2 bg-blue-600 rounded-lg">
@@ -132,10 +165,9 @@ const App: React.FC = () => {
         </div>
       </header>
 
-      {/* Dashboard Main Area */}
       <main className="flex-1 overflow-y-auto p-6 bg-slate-950">
         {devices.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-full text-slate-500">
+          <div className="flex flex-col items-center justify-center h-full text-slate-500 text-center">
             <div className="w-24 h-24 mb-6 opacity-20">
                <svg className="w-full h-full" fill="currentColor" viewBox="0 0 20 20"><path d="M2 6a2 2 0 012-2h12a2 2 0 012 2v2a2 2 0 100 4v2a2 2 0 01-2 2H4a2 2 0 01-2-2v-2a2 2 0 100-4V6z"></path></svg>
             </div>
@@ -151,10 +183,7 @@ const App: React.FC = () => {
         ) : (
           <div className={gridClass}>
             {devices.map(device => {
-              // If focused, only show the focused one or show others in a sidebar? 
-              // Simple version: Hide others when focused
               if (focusedId && device.id !== focusedId) return null;
-              
               return (
                 <div key={device.id} className={focusedId === device.id ? 'max-w-4xl mx-auto w-full' : ''}>
                   <DeviceCard
@@ -178,7 +207,6 @@ const App: React.FC = () => {
         )}
       </main>
 
-      {/* Footer Info */}
       <footer className="px-6 py-2 bg-slate-900 border-t border-slate-800 text-[10px] text-slate-500 flex justify-between items-center shrink-0">
         <div className="flex gap-4">
           <span>Active Streams: {devices.length}</span>
@@ -186,11 +214,10 @@ const App: React.FC = () => {
           <span>Protocol: WebRTC/UDP</span>
         </div>
         <div>
-          &copy; 2024 View-Only Monitor v1.0.0
+          &copy; 2024 View-Only Monitor v1.1.0
         </div>
       </footer>
 
-      {/* Modals */}
       {showQR && (
         <QRCodeModal 
           url={`${window.location.origin}${window.location.pathname}?mode=sender&room=${MOCK_ROOM_ID}`} 
