@@ -4,21 +4,42 @@ import { DeviceCard } from './components/DeviceCard';
 import { QRCodeModal } from './components/QRCodeModal';
 import { DeviceStream } from './types';
 
-const ROOM_ID = "vmonitor_global_room_001";
+const ROOM_ID = "vmonitor_meet_room_888";
 const FIREBASE_BASE_URL = `https://v-monitor-pro-default-rtdb.asia-southeast1.firebasedatabase.app/rooms/${ROOM_ID}`;
+
+const ICE_CONFIG: RTCConfiguration = {
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun.services.mozilla.com' }
+  ],
+  iceCandidatePoolSize: 10,
+};
 
 const App: React.FC = () => {
   const [devices, setDevices] = useState<DeviceStream[]>([]);
   const [showQR, setShowQR] = useState(false);
-  const [isSender, setIsSender] = useState(false);
+  const [role, setRole] = useState<'sender' | 'dashboard' | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
   const [isWebview, setIsWebview] = useState(false);
+  const [connectionStatus, setConnectionStatus] = useState<string>('Ready');
   
   const peerConnections = useRef<Map<string, RTCPeerConnection>>(new Map());
   const localStreamRef = useRef<MediaStream | null>(null);
-  const myDeviceId = useRef<string>("DEV-" + Math.random().toString(36).substr(2, 4).toUpperCase());
+  const myDeviceId = useRef<string>("USER-" + Math.random().toString(36).substr(2, 4).toUpperCase());
   const lastProcessedTimestamp = useRef<number>(Date.now());
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const mode = params.get('mode');
+    if (mode === 'sender') setRole('sender');
+    if (mode === 'dashboard') setRole('dashboard');
+    
+    const ua = navigator.userAgent || "";
+    setIsWebview(/Zalo|FBAN|FBAV/i.test(ua));
+  }, []);
 
   const sendSignal = async (to: string, data: any) => {
     try {
@@ -26,23 +47,21 @@ const App: React.FC = () => {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          from: isSender ? myDeviceId.current : 'DASHBOARD',
+          from: myDeviceId.current,
           to: to,
           ...data,
           timestamp: Date.now()
         })
       });
-    } catch (e) {
-      console.error("Firebase send error:", e);
-    }
+    } catch (e) { console.error("Signal Error:", e); }
   };
 
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    if (params.get('mode') === 'sender') {
-      setIsSender(true);
-      const ua = navigator.userAgent || "";
-      setIsWebview(/Zalo|FBAN|FBAV/i.test(ua));
+    if (!role) return;
+
+    // Dashboard chủ động thông báo "Tôi đã vào" để các máy đang share biết mà gửi Offer
+    if (role === 'dashboard') {
+      sendSignal('BROADCAST', { type: 'JOIN' });
     }
 
     const signalInterval = setInterval(async () => {
@@ -51,78 +70,95 @@ const App: React.FC = () => {
         const data = await res.json();
         if (!data) return;
 
-        const target = isSender ? myDeviceId.current : 'DASHBOARD';
         const messages = Object.keys(data).map(key => data[key]);
         messages.sort((a, b) => a.timestamp - b.timestamp);
 
         for (const msg of messages) {
           if (msg.timestamp <= lastProcessedTimestamp.current) continue;
-          if (msg.to !== target || msg.from === target) continue;
+          if (msg.to !== myDeviceId.current && msg.to !== 'BROADCAST') continue;
+          if (msg.from === myDeviceId.current) continue;
 
-          handleIncomingSignal(msg);
+          await handleIncomingSignal(msg);
           lastProcessedTimestamp.current = msg.timestamp;
         }
       } catch (e) {}
-    }, 1000); // Tăng tần suất polling lên 1s để kết nối nhanh hơn
+    }, 1500);
 
     return () => {
       clearInterval(signalInterval);
       peerConnections.current.forEach(pc => pc.close());
+      peerConnections.current.clear();
     };
-  }, [isSender]);
+  }, [role, isStreaming]);
 
   const handleIncomingSignal = async (msg: any) => {
     const { type, from, payload } = msg;
-    let pc = peerConnections.current.get(from || 'DASHBOARD');
+    let pc = peerConnections.current.get(from);
 
-    if (!isSender) {
-      if (type === 'JOIN') {
-        createPeerConnection(from, true);
-      } else if (type === 'OFFER') {
-        if (!pc) pc = createPeerConnection(from, true);
-        await pc.setRemoteDescription(new RTCSessionDescription(payload));
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
-        sendSignal(from, { type: 'ANSWER', payload: answer });
-      } else if (type === 'ICE_CANDIDATE') {
-        if (pc) await pc.addIceCandidate(new RTCIceCandidate(payload)).catch(e => console.warn(e));
-      }
-    } else {
-      if (type === 'ANSWER') {
-        if (pc) await pc.setRemoteDescription(new RTCSessionDescription(payload));
-      } else if (type === 'ICE_CANDIDATE') {
-        if (pc) await pc.addIceCandidate(new RTCIceCandidate(payload)).catch(e => console.warn(e));
-      }
+    switch (type) {
+      case 'JOIN':
+        // Nếu mình là Dashboard, chuẩn bị nhận
+        if (role === 'dashboard') {
+          setConnectionStatus(`Detecting sender ${from}...`);
+          createPeerConnection(from, true);
+          sendSignal(from, { type: 'REQUEST_OFFER' });
+        } 
+        // Nếu mình là Sender và đang phát, phản hồi lại Dashboard mới
+        else if (role === 'sender' && isStreaming) {
+          handleIncomingSignal({ type: 'REQUEST_OFFER', from });
+        }
+        break;
+      case 'REQUEST_OFFER':
+        if (role === 'sender' && isStreaming) {
+          setConnectionStatus(`Sending stream to ${from}...`);
+          const newPc = createPeerConnection(from, false);
+          const offer = await newPc.createOffer();
+          await newPc.setLocalDescription(offer);
+          sendSignal(from, { type: 'OFFER', payload: offer });
+        }
+        break;
+      case 'OFFER':
+        if (role === 'dashboard') {
+          if (!pc) pc = createPeerConnection(from, true);
+          await pc.setRemoteDescription(new RTCSessionDescription(payload));
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          sendSignal(from, { type: 'ANSWER', payload: answer });
+        }
+        break;
+      case 'ANSWER':
+        if (pc) {
+          await pc.setRemoteDescription(new RTCSessionDescription(payload));
+          setConnectionStatus('Connected!');
+        }
+        break;
+      case 'ICE_CANDIDATE':
+        if (pc) await pc.addIceCandidate(new RTCIceCandidate(payload)).catch(() => {});
+        break;
     }
   };
 
-  const createPeerConnection = (id: string, isReceiver: boolean) => {
-    const pc = new RTCPeerConnection({
-      iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' },
-        { urls: 'stun:stun2.l.google.com:19302' },
-        { urls: 'stun:stun3.l.google.com:19302' },
-        { urls: 'stun:stun4.l.google.com:19302' }
-      ]
-    });
+  const createPeerConnection = (remoteId: string, isReceiver: boolean) => {
+    if (peerConnections.current.has(remoteId)) {
+        peerConnections.current.get(remoteId)?.close();
+    }
+
+    const pc = new RTCPeerConnection(ICE_CONFIG);
 
     pc.onicecandidate = (e) => {
       if (e.candidate) {
-        sendSignal(isReceiver ? id : 'DASHBOARD', { 
-          type: 'ICE_CANDIDATE', 
-          payload: e.candidate 
-        });
+        sendSignal(remoteId, { type: 'ICE_CANDIDATE', payload: e.candidate });
       }
     };
 
     if (isReceiver) {
       pc.ontrack = (e) => {
+        console.log("Track received from", remoteId);
         setDevices(prev => {
-          if (prev.find(d => d.id === id)) return prev;
+          if (prev.find(d => d.id === remoteId)) return prev;
           return [...prev, {
-            id: id,
-            name: `Device ${id.slice(-4)}`,
+            id: remoteId,
+            name: `Device ${remoteId.split('-')[1]}`,
             stream: e.streams[0],
             connectedAt: Date.now(),
             isFocused: false,
@@ -138,146 +174,131 @@ const App: React.FC = () => {
       }
     }
 
-    // Theo dõi trạng thái kết nối
     pc.oniceconnectionstatechange = () => {
-      console.log(`ICE state: ${pc.iceConnectionState}`);
-      if (pc.iceConnectionState === 'disconnected') {
-        if (isReceiver) {
-          setDevices(prev => prev.filter(d => d.id !== id));
-        }
+      console.log(`Connection state with ${remoteId}: ${pc.iceConnectionState}`);
+      if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed') {
+        setDevices(prev => prev.filter(d => d.id !== remoteId));
+        peerConnections.current.delete(remoteId);
       }
     };
 
-    peerConnections.current.set(isReceiver ? id : 'DASHBOARD', pc);
+    peerConnections.current.set(remoteId, pc);
     return pc;
   };
 
-  const startMobileCapture = async () => {
-    setError(null);
+  const startSharing = async () => {
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia({ 
         video: { 
-          frameRate: { ideal: 20, max: 30 },
-          width: { ideal: 1280 } 
+            frameRate: { ideal: 30, max: 60 },
+            width: { ideal: 1280 }
         }, 
         audio: false 
       });
       localStreamRef.current = stream;
       setIsStreaming(true);
-
-      const pc = createPeerConnection(myDeviceId.current, false);
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-
-      await sendSignal('DASHBOARD', { type: 'JOIN' });
-      await sendSignal('DASHBOARD', { type: 'OFFER', payload: offer });
-
+      setConnectionStatus('Streaming started, waiting for Dashboard...');
+      
+      // Gửi broadcast ngay lập tức
+      await sendSignal('BROADCAST', { type: 'JOIN' });
+      
       stream.getVideoTracks()[0].onended = () => {
+        setIsStreaming(false);
         window.location.reload();
       };
-    } catch (err: any) {
-      setError(err.name === 'NotAllowedError' ? "Vui lòng cấp quyền quay màn hình" : "Lỗi: " + err.message);
+    } catch (err) {
+      setError("Không thể chia sẻ màn hình. Hãy chắc chắn bạn đã cấp quyền.");
     }
   };
 
-  if (isSender) {
+  if (!role) {
     return (
-      <div className="flex flex-col items-center justify-center min-h-screen p-6 bg-slate-950 text-slate-100">
-        <div className={`w-28 h-28 rounded-[3rem] flex items-center justify-center mb-10 shadow-2xl transition-all duration-1000 ${isStreaming ? 'bg-red-500 shadow-red-500/20' : 'bg-indigo-600 shadow-indigo-600/20'}`}>
-          <span className="text-4xl animate-pulse">{isStreaming ? '📡' : '📱'}</span>
+      <div className="flex flex-col items-center justify-center min-h-screen bg-slate-950 p-6">
+        <div className="w-20 h-20 bg-indigo-600 rounded-3xl flex items-center justify-center mb-8 shadow-2xl shadow-indigo-600/20">
+          <svg className="w-10 h-10 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
         </div>
+        <h1 className="text-3xl font-black italic tracking-tighter mb-2 uppercase">V-Monitor Center</h1>
+        <p className="text-slate-500 text-sm mb-12 uppercase tracking-[0.3em] font-bold text-center">Hệ thống giám sát điện thoại thời gian thực</p>
         
-        <h1 className="text-2xl font-black uppercase italic mb-2 tracking-tighter">Remote Node</h1>
-        <p className="text-[10px] text-slate-500 uppercase font-bold tracking-[0.4em] mb-12">ID: {myDeviceId.current}</p>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 w-full max-w-2xl">
+          <button onClick={() => setRole('dashboard')} className="group p-8 bg-slate-900 border border-white/5 rounded-[2rem] hover:border-indigo-500/50 transition-all text-left">
+            <div className="w-12 h-12 bg-indigo-500/10 rounded-2xl flex items-center justify-center mb-6 group-hover:bg-indigo-500/20 transition-colors">
+              <svg className="w-6 h-6 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.75 17L9 21h6l-.75-4M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" /></svg>
+            </div>
+            <h3 className="text-xl font-bold mb-2 uppercase">Giao diện Dashboard</h3>
+            <p className="text-slate-500 text-xs leading-relaxed">Tiếp nhận và xem luồng trực tiếp từ các máy điện thoại.</p>
+          </button>
+          <button onClick={() => setRole('sender')} className="group p-8 bg-slate-900 border border-white/5 rounded-[2rem] hover:border-emerald-500/50 transition-all text-left">
+            <div className="w-12 h-12 bg-emerald-500/10 rounded-2xl flex items-center justify-center mb-6 group-hover:bg-emerald-500/20 transition-colors">
+              <svg className="w-6 h-6 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z" /></svg>
+            </div>
+            <h3 className="text-xl font-bold mb-2 uppercase">Thiết bị Phát (Phone)</h3>
+            <p className="text-slate-500 text-xs leading-relaxed">Chia sẻ toàn bộ màn hình điện thoại của bạn ngay lập tức.</p>
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (role === 'sender') {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-screen p-6 bg-slate-950">
+        <div className={`w-24 h-24 rounded-[2.5rem] flex items-center justify-center mb-8 shadow-2xl transition-all duration-700 ${isStreaming ? 'bg-red-500 animate-pulse' : 'bg-indigo-600'}`}>
+          <span className="text-4xl">{isStreaming ? '📡' : '📱'}</span>
+        </div>
+        <h2 className="text-xl font-black uppercase italic mb-4 tracking-tighter">Phone: {myDeviceId.current.split('-')[1]}</h2>
+        <div className="mb-8 px-4 py-2 bg-slate-900 rounded-full border border-white/5">
+            <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">{connectionStatus}</span>
+        </div>
 
         {isWebview ? (
-          <div className="bg-amber-500/10 border border-amber-500/30 p-8 rounded-[2rem] text-center max-w-xs backdrop-blur-xl">
-            <p className="text-amber-500 text-xs font-black uppercase mb-4 tracking-widest">⚠️ Không hỗ trợ In-App Browser</p>
-            <p className="text-slate-400 text-[10px] mb-8 leading-relaxed">Vui lòng bấm vào nút bên dưới, sau đó mở trình duyệt <b>Safari</b> (iOS) hoặc <b>Chrome</b> (Android) để tiếp tục.</p>
-            <button onClick={() => {
-              navigator.clipboard.writeText(window.location.href);
-              alert("Đã copy link!");
-            }} className="w-full py-4 bg-amber-500 text-slate-950 rounded-2xl text-[11px] font-black uppercase shadow-xl shadow-amber-500/20">Copy Link Kết Nối</button>
+          <div className="bg-amber-500/10 border border-amber-500/30 p-8 rounded-3xl text-center max-w-xs">
+            <p className="text-amber-500 text-xs font-black uppercase mb-4 leading-relaxed">⚠️ Hãy mở bằng Safari (iOS) hoặc Chrome (Android)</p>
+            <button onClick={() => { navigator.clipboard.writeText(window.location.href); alert("Đã copy!"); }} className="w-full py-4 bg-amber-500 text-slate-950 rounded-2xl text-[10px] font-black uppercase">Copy Link</button>
           </div>
-        ) : error ? (
-          <div className="bg-red-500/10 border border-red-500/30 p-8 rounded-[2rem] text-center max-w-xs backdrop-blur-xl">
-            <p className="text-red-400 text-xs font-black uppercase mb-4 tracking-widest">Lỗi thiết bị</p>
-            <p className="text-slate-400 text-[10px] mb-8 leading-relaxed">{error}</p>
-            <button onClick={() => window.location.reload()} className="w-full py-4 bg-red-500 rounded-2xl text-[11px] font-black uppercase shadow-xl shadow-red-500/20">Thử lại</button>
+        ) : isStreaming ? (
+          <div className="text-center">
+            <button onClick={() => window.location.reload()} className="px-10 py-4 bg-slate-900 border border-white/10 rounded-2xl text-[10px] font-black uppercase hover:bg-red-500/20 transition-all">Dừng phát</button>
           </div>
         ) : (
-          !isStreaming && (
-            <button 
-              onClick={startMobileCapture} 
-              className="group relative w-full max-w-xs py-6 bg-indigo-600 rounded-[2.5rem] font-black uppercase tracking-[0.2em] text-sm shadow-2xl shadow-indigo-600/40 active:scale-95 transition-all"
-            >
-              <span className="relative z-10">Bắt đầu truyền</span>
-              <div className="absolute inset-0 bg-white/10 rounded-[2.5rem] opacity-0 group-hover:opacity-100 transition-opacity" />
-            </button>
-          )
+          <button onClick={startSharing} className="w-full max-w-xs py-6 bg-indigo-600 rounded-[2.5rem] font-black uppercase tracking-widest text-sm shadow-2xl shadow-indigo-600/40 active:scale-95 transition-all">Chia sẻ ngay</button>
         )}
-
-        {isStreaming && (
-          <div className="flex flex-col items-center animate-in fade-in slide-in-from-bottom-4 duration-700">
-            <div className="flex items-center gap-3 mb-8 bg-white/5 px-6 py-3 rounded-2xl border border-white/5">
-              <div className="w-2.5 h-2.5 bg-red-500 rounded-full animate-ping" />
-              <p className="text-red-500 text-[11px] font-black uppercase tracking-widest">Đang truyền hình ảnh</p>
-            </div>
-            <button onClick={() => window.location.reload()} className="px-10 py-4 bg-slate-900 text-slate-400 text-[10px] font-black uppercase rounded-2xl border border-white/10 hover:text-white transition-colors">Ngắt kết nối</button>
-          </div>
-        )}
+        <button onClick={() => setRole(null)} className="mt-12 text-slate-600 text-[10px] font-bold uppercase tracking-widest hover:text-white transition-colors italic">← Đổi vai trò</button>
+        {error && <p className="mt-8 text-red-500 text-[10px] uppercase font-bold text-center">{error}</p>}
       </div>
     );
   }
 
   return (
-    <div className="flex flex-col h-screen bg-slate-950 text-slate-100 selection:bg-indigo-500/30">
+    <div className="flex flex-col h-screen bg-slate-950 text-slate-100">
       <header className="flex items-center justify-between px-10 py-6 bg-slate-900/40 backdrop-blur-2xl border-b border-white/5 z-20">
         <div className="flex items-center gap-5">
-          <div className="w-12 h-12 bg-gradient-to-br from-indigo-500 to-indigo-700 rounded-2xl flex items-center justify-center shadow-2xl shadow-indigo-600/30 transform -rotate-3">
-            <svg className="w-7 h-7 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
-          </div>
+          <button onClick={() => setRole(null)} className="w-10 h-10 bg-slate-800 rounded-xl flex items-center justify-center hover:bg-slate-700 transition-colors">
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" /></svg>
+          </button>
           <div>
-            <h1 className="text-2xl font-black uppercase italic tracking-tighter leading-none mb-1">V-Monitor <span className="text-indigo-500">Pro</span></h1>
-            <div className="flex items-center gap-2">
-              <div className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse" />
-              <p className="text-[9px] text-slate-500 font-bold uppercase tracking-widest">Global Relay Active</p>
-            </div>
+            <h1 className="text-xl font-black uppercase italic tracking-tighter">V-Monitor <span className="text-indigo-500">Center</span></h1>
+            <p className="text-[9px] text-slate-500 font-bold uppercase tracking-widest">Trạng thái: {connectionStatus}</p>
           </div>
         </div>
-        <button 
-          onClick={() => setShowQR(true)} 
-          className="group px-8 py-3.5 bg-indigo-600 text-[11px] font-black rounded-2xl uppercase tracking-widest hover:bg-indigo-500 hover:-translate-y-0.5 transition-all shadow-xl shadow-indigo-600/30 flex items-center gap-3"
-        >
-          <span>Thêm thiết bị</span>
-          <svg className="w-4 h-4 group-hover:rotate-90 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M12 4v16m8-8H4" /></svg>
-        </button>
+        <button onClick={() => setShowQR(true)} className="px-6 py-3 bg-indigo-600 text-[10px] font-black rounded-2xl uppercase tracking-widest hover:bg-indigo-500 transition-all">Mã QR</button>
       </header>
 
       <main className="flex-1 p-10 overflow-y-auto bg-[radial-gradient(circle_at_top_right,_var(--tw-gradient-stops))] from-indigo-500/5 via-slate-950 to-slate-950">
         {devices.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center">
-            <div className="relative w-32 h-32 mb-10">
-              <div className="absolute inset-0 border-[6px] border-indigo-500/10 rounded-full" />
-              <div className="absolute inset-0 border-t-[6px] border-indigo-500 rounded-full animate-spin" />
-              <div className="absolute inset-4 bg-slate-900 rounded-full flex items-center justify-center">
-                <svg className="w-10 h-10 text-slate-700" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z" /></svg>
-              </div>
-            </div>
-            <h2 className="text-sm font-black uppercase tracking-[0.6em] text-slate-600 mb-4">No Active Nodes</h2>
-            <p className="text-[10px] text-slate-500 max-w-xs text-center leading-relaxed uppercase font-bold tracking-widest opacity-60">
-              Hãy quét mã QR và nhấn bắt đầu truyền trên điện thoại để hiển thị tại đây.
-            </p>
+            <div className="w-16 h-16 border-2 border-indigo-500/20 border-t-indigo-500 rounded-full animate-spin mb-6" />
+            <h2 className="text-[10px] font-black uppercase tracking-[0.5em] text-slate-600">Đang chờ tín hiệu từ điện thoại...</h2>
           </div>
         ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-10 animate-in fade-in zoom-in-95 duration-1000">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-10">
             {devices.map(device => (
               <DeviceCard
                 key={device.id}
                 device={device}
                 onFocus={() => {}}
                 onRename={(id, name) => setDevices(prev => prev.map(d => d.id === id ? {...d, name} : d))}
-                onRefresh={() => {}}
+                onRefresh={() => sendSignal(device.id, { type: 'REQUEST_OFFER' })}
               />
             ))}
           </div>
