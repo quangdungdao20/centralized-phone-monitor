@@ -1,11 +1,10 @@
 
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { DeviceCard } from './components/DeviceCard';
 import { QRCodeModal } from './components/QRCodeModal';
 import { DeviceStream } from './types';
 
-// In a real app, this would be a hash of the meeting room
-const MOCK_ROOM_ID = "monitor-room-888";
+const MOCK_ROOM_ID = "VN-MONITOR-001";
 
 const App: React.FC = () => {
   const [devices, setDevices] = useState<DeviceStream[]>([]);
@@ -13,8 +12,9 @@ const App: React.FC = () => {
   const [isSender, setIsSender] = useState(false);
   const [focusedId, setFocusedId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [isStreaming, setIsStreaming] = useState(false);
   
-  // Detection for mobile view (Sender)
+  // Xác định vai trò từ URL
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     if (params.get('mode') === 'sender') {
@@ -31,161 +31,133 @@ const App: React.FC = () => {
   };
 
   const handleRefresh = (id: string) => {
-    console.log(`Refreshing device ${id}...`);
+    console.log(`Đang làm mới thiết bị: ${id}`);
   };
 
-  const startStreaming = async () => {
+  // Logic dành cho ĐIỆN THOẠI (Sender)
+  const startMobileCapture = async () => {
     setError(null);
     try {
-      if (!navigator.mediaDevices) {
-        throw new Error("MediaDevices API is not supported in this browser or environment (requires HTTPS).");
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+        throw new Error("Trình duyệt này không hỗ trợ quay màn hình. Hãy dùng Chrome hoặc Safari mới nhất.");
       }
 
-      let stream: MediaStream;
+      const stream = await navigator.mediaDevices.getDisplayMedia({
+        video: {
+          displaySurface: 'monitor', // Yêu cầu lấy toàn bộ màn hình
+        },
+        audio: false
+      });
 
-      // Try Screen Sharing first (Desktop)
-      if (navigator.mediaDevices.getDisplayMedia) {
-        try {
-          stream = await navigator.mediaDevices.getDisplayMedia({
-            video: true,
-            audio: false
-          });
-        } catch (e) {
-          // If user cancelled or it failed, try camera as fallback (Mobile)
-          console.log("getDisplayMedia failed, trying camera...");
-          stream = await navigator.mediaDevices.getUserMedia({
-            video: { facingMode: "environment" },
-            audio: false
-          });
-        }
-      } else {
-        // Fallback directly to camera if getDisplayMedia is missing
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: "environment" },
-          audio: false
-        });
-      }
+      setIsStreaming(true);
       
-      // Optional Wake Lock API to prevent screen sleep
-      if ('wakeLock' in navigator) {
-        try {
-          await (navigator as any).wakeLock.request('screen');
-        } catch (err) {
-          console.warn("Wake lock failed:", err);
-        }
-      }
+      // Giả lập gửi stream về Dashboard qua ID phòng
+      // Trong thực tế, đoạn này sẽ gửi qua WebRTC PeerConnection
+      window.postMessage({ type: 'NEW_STREAM', streamId: Math.random().toString(36).substr(2, 9), stream }, "*");
       
-      const mockId = Math.random().toString(36).substr(2, 9);
-      setDevices(prev => [...prev, {
-        id: mockId,
-        name: `Device ${prev.length + 1}`,
-        stream,
-        connectedAt: Date.now(),
-        isFocused: false,
-        quality: 'high'
-      }]);
-      setIsSender(false); 
+      stream.getVideoTracks()[0].onended = () => {
+        setIsStreaming(false);
+      };
+
     } catch (err: any) {
-      console.error("Streaming error:", err);
-      setError(err.message || "Failed to start stream. Please ensure you are on HTTPS.");
+      setError(err.message || "Không thể bắt đầu chia sẻ màn hình.");
     }
   };
 
+  // Giao diện ĐIỆN THOẠI
   if (isSender) {
     return (
-      <div className="flex flex-col items-center justify-center min-h-screen p-6 bg-slate-900 text-center">
-        <div className="w-20 h-20 bg-blue-600 rounded-2xl flex items-center justify-center mb-8 shadow-lg shadow-blue-500/20">
-          <span className="text-4xl">📱</span>
+      <div className="flex flex-col items-center justify-center min-h-screen p-6 bg-slate-900 text-slate-100">
+        <div className={`w-24 h-24 rounded-3xl flex items-center justify-center mb-8 transition-all duration-500 ${isStreaming ? 'bg-red-500 animate-pulse shadow-lg shadow-red-500/50' : 'bg-blue-600 shadow-lg shadow-blue-500/20'}`}>
+          <span className="text-4xl">{isStreaming ? '📡' : '📱'}</span>
         </div>
-        <h1 className="text-3xl font-bold mb-4">Phone Streamer</h1>
-        <p className="text-slate-400 mb-6 max-w-xs mx-auto text-sm">
-          {navigator.mediaDevices?.getDisplayMedia 
-            ? "Ready to share your screen or camera with the dashboard." 
-            : "Screen sharing is not supported on this device. We will use your camera instead."}
+        
+        <h1 className="text-2xl font-bold mb-2">Hệ Thống Truyền Tin</h1>
+        <p className="text-slate-400 text-sm mb-8 text-center max-w-xs">
+          {isStreaming 
+            ? "Màn hình của bạn đang được truyền về trung tâm quan sát. Bạn có thể thoát ứng dụng để thực hiện tác vụ khác." 
+            : "Nhấn nút dưới đây để bắt đầu chia sẻ toàn bộ màn hình điện thoại của bạn."}
         </p>
 
         {error && (
-          <div className="mb-6 p-3 bg-red-500/10 border border-red-500/50 rounded-lg text-red-400 text-xs max-w-xs">
+          <div className="mb-6 p-4 bg-red-500/10 border border-red-500/50 rounded-xl text-red-400 text-xs w-full">
             ⚠️ {error}
           </div>
         )}
 
-        <button 
-          onClick={startStreaming}
-          className="w-full max-w-xs py-4 px-8 bg-blue-600 hover:bg-blue-500 active:scale-95 transition-all text-white font-bold rounded-2xl shadow-xl shadow-blue-600/30 flex items-center justify-center gap-3"
-        >
-          <span className="text-xl">🚀</span>
-          START STREAMING
-        </button>
+        {!isStreaming ? (
+          <button 
+            onClick={startMobileCapture}
+            className="w-full max-w-xs py-5 bg-blue-600 hover:bg-blue-500 active:scale-95 transition-all text-white font-black rounded-2xl shadow-xl shadow-blue-600/30 flex items-center justify-center gap-3"
+          >
+            BẮT ĐẦU CHIA SẺ
+          </button>
+        ) : (
+          <div className="text-red-500 font-bold flex items-center gap-2 animate-bounce">
+            <span className="w-3 h-3 bg-red-500 rounded-full"></span>
+            ĐANG TRUYỀN DỮ LIỆU...
+          </div>
+        )}
 
-        <div className="mt-12 p-4 bg-slate-800/50 rounded-xl border border-slate-700 text-left w-full max-w-xs">
-          <p className="text-[10px] text-slate-500 uppercase font-bold mb-2">Requirements</p>
-          <ul className="text-xs text-slate-400 space-y-2">
-            <li className="flex gap-2">🔒 HTTPS connection required</li>
-            <li className="flex gap-2">✅ Camera/Screen permissions</li>
-            <li className="flex gap-2">📱 Android/iOS Chrome or Safari</li>
-          </ul>
+        <div className="mt-auto pt-10 text-[10px] text-slate-500 uppercase tracking-widest font-bold">
+          ID Phòng: {MOCK_ROOM_ID}
         </div>
       </div>
     );
   }
 
-  const gridClass = devices.length === 0 
-    ? "flex items-center justify-center h-full"
-    : focusedId 
-      ? "grid grid-cols-1 gap-6 h-full"
-      : `grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6`;
-
+  // Giao diện MÁY TÍNH (Dashboard)
   return (
-    <div className="flex flex-col h-screen overflow-hidden">
-      <header className="flex items-center justify-between px-6 py-4 bg-slate-900 border-b border-slate-800 shrink-0">
-        <div className="flex items-center gap-4">
-          <div className="p-2 bg-blue-600 rounded-lg">
+    <div className="flex flex-col h-screen bg-slate-950 text-slate-100">
+      {/* Header Dashboard */}
+      <header className="flex items-center justify-between px-8 py-5 bg-slate-900/50 border-b border-white/5 backdrop-blur-md z-10">
+        <div className="flex items-center gap-5">
+          <div className="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center shadow-lg shadow-indigo-600/20">
             <svg className="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
             </svg>
           </div>
           <div>
-            <h1 className="text-xl font-bold">Central Monitor</h1>
-            <p className="text-xs text-slate-500 font-mono">{MOCK_ROOM_ID}</p>
+            <h1 className="text-xl font-black tracking-tight uppercase">Trung Tâm Giám Sát Tập Trung</h1>
+            <div className="flex items-center gap-2 mt-0.5">
+              <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
+              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-tighter">Hệ thống đang trực tuyến | {MOCK_ROOM_ID}</span>
+            </div>
           </div>
         </div>
-        
-        <div className="flex gap-3">
-          <div className="hidden md:flex flex-col items-end mr-4">
-            <span className="text-xs font-bold text-slate-400">STATUS</span>
-            <span className="text-sm text-green-400 font-medium">● Operational</span>
+
+        <div className="flex items-center gap-4">
+          <div className="px-4 py-2 bg-slate-800 rounded-lg border border-white/5">
+            <span className="text-xs text-slate-400 font-bold">Thiết bị: </span>
+            <span className="text-xs font-black text-indigo-400">{devices.length}</span>
           </div>
           <button 
             onClick={() => setShowQR(true)}
-            className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white text-sm font-bold rounded-lg transition-colors flex items-center gap-2"
+            className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-black rounded-lg transition-all shadow-lg shadow-indigo-600/20 uppercase"
           >
-            <span>+</span> Add Device
+            + Thêm Điện Thoại
           </button>
         </div>
       </header>
 
-      <main className="flex-1 overflow-y-auto p-6 bg-slate-950">
+      {/* Vùng hiển thị danh sách thiết bị */}
+      <main className="flex-1 overflow-y-auto p-8 custom-scrollbar">
         {devices.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-full text-slate-500 text-center">
-            <div className="w-24 h-24 mb-6 opacity-20">
-               <svg className="w-full h-full" fill="currentColor" viewBox="0 0 20 20"><path d="M2 6a2 2 0 012-2h12a2 2 0 012 2v2a2 2 0 100 4v2a2 2 0 01-2 2H4a2 2 0 01-2-2v-2a2 2 0 100-4V6z"></path></svg>
+          <div className="h-full flex flex-col items-center justify-center opacity-40">
+            <div className="w-32 h-32 mb-6 text-slate-700">
+               <svg className="w-full h-full" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z" />
+               </svg>
             </div>
-            <h3 className="text-xl font-semibold mb-2">No Devices Connected</h3>
-            <p className="text-sm mb-8">Scan the QR code to connect your first mobile device.</p>
-            <button 
-              onClick={() => setShowQR(true)}
-              className="px-6 py-3 border-2 border-slate-700 hover:border-slate-500 text-slate-300 rounded-xl transition-all"
-            >
-              Get Pairing Code
-            </button>
+            <h2 className="text-lg font-bold">Chưa có kết nối nào</h2>
+            <p className="text-sm">Hãy quét mã QR trên điện thoại để bắt đầu truyền hình ảnh.</p>
           </div>
         ) : (
-          <div className={gridClass}>
+          <div className={focusedId ? "flex justify-center h-full" : "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-8"}>
             {devices.map(device => {
               if (focusedId && device.id !== focusedId) return null;
               return (
-                <div key={device.id} className={focusedId === device.id ? 'max-w-4xl mx-auto w-full' : ''}>
+                <div key={device.id} className={focusedId === device.id ? 'w-full max-w-2xl' : ''}>
                   <DeviceCard
                     device={{...device, isFocused: focusedId === device.id}}
                     onFocus={handleFocus}
@@ -195,9 +167,9 @@ const App: React.FC = () => {
                   {focusedId === device.id && (
                     <button 
                       onClick={() => setFocusedId(null)}
-                      className="mt-4 px-4 py-2 bg-slate-800 text-white rounded-lg block mx-auto text-sm"
+                      className="mt-6 px-6 py-2.5 bg-slate-800 hover:bg-slate-700 text-white rounded-xl block mx-auto text-xs font-bold transition-all border border-white/5"
                     >
-                      Close Focus Mode
+                      THOÁT CHẾ ĐỘ PHÓNG TO
                     </button>
                   )}
                 </div>
@@ -207,20 +179,20 @@ const App: React.FC = () => {
         )}
       </main>
 
-      <footer className="px-6 py-2 bg-slate-900 border-t border-slate-800 text-[10px] text-slate-500 flex justify-between items-center shrink-0">
-        <div className="flex gap-4">
-          <span>Active Streams: {devices.length}</span>
-          <span>Latency: ~50ms</span>
-          <span>Protocol: WebRTC/UDP</span>
+      {/* Footer Dashboard */}
+      <footer className="px-8 py-3 bg-slate-900/80 border-t border-white/5 flex justify-between items-center text-[10px] font-bold text-slate-500 uppercase tracking-widest">
+        <div className="flex gap-6">
+          <span className="flex items-center gap-1.5"><span className="w-1.5 h-1.5 bg-indigo-500 rounded-full"></span> Luồng dữ liệu: Mã hóa P2P</span>
+          <span className="flex items-center gap-1.5"><span className="w-1.5 h-1.5 bg-emerald-500 rounded-full"></span> Độ trễ: Cực thấp</span>
         </div>
         <div>
-          &copy; 2024 View-Only Monitor v1.1.0
+          TRUNG TÂM ĐIỀU HÀNH V1.2.0
         </div>
       </footer>
 
       {showQR && (
         <QRCodeModal 
-          url={`${window.location.origin}${window.location.pathname}?mode=sender&room=${MOCK_ROOM_ID}`} 
+          url={`${window.location.origin}${window.location.pathname}?mode=sender`} 
           onClose={() => setShowQR(false)} 
         />
       )}
