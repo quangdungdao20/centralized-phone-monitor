@@ -37,7 +37,7 @@ export const QRCodeModal: React.FC<QRCodeModalProps> = ({ url, onClose }) => {
 
         <div className="w-full bg-slate-50 p-3 rounded-lg border border-dashed border-slate-300 mb-6 overflow-hidden">
           <p className="text-[10px] uppercase font-bold text-slate-400 mb-1">Pairing URL</p>
-          <a className="text-xs text-slate-600 truncate" href={url} target="_blank" rel="noopener noreferrer">{url}</a>
+          <a className="text-xs text-slate-600 truncate" >{url}</a>
         </div>
 
         <button 
