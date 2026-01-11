@@ -1,0 +1,8 @@
+{
+  "name": "Centralized Phone Monitor (View-Only)",
+  "description": "A professional real-time multi-device screen monitoring dashboard using WebRTC for view-only surveillance, testing, or demo presentations.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
